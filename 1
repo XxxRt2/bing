@@ -1,0 +1,168 @@
+import logging
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+# 设置日志
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 初始化赔率和波色映射
+odds = {
+    '特码': 47,
+    '大小': 1.95,
+    '单双': 1.95,
+    '特肖不带龙': 11.7,
+    '特肖带龙': 9.5,
+    '平特一肖不带龙': [2.1, 4.5, 12.5, 36, 100],
+    '平特一肖带龙': [1.8, 3.5, 8.5, 31, 90],
+    '不中': {5: 2, 6: 2.5, 7: 3, 8: 3.5, 9: 4, 10: 5},
+    '波色': {'红波': 2.75, '蓝波': 2.98, '绿波': 2.98}
+}
+
+wave_colors = {
+    '红波': {1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46},
+    '蓝波': {3, 4, 9, 10, 14, 15, 20, 25, 26, 31, 36, 37, 41, 42, 47, 48},
+    '绿波': {5, 6, 11, 16, 17, 21, 22, 27, 28, 32, 33, 38, 39, 43, 44, 49}
+}
+
+# 用户下注和余额字典
+user_bets = {}
+user_balance = {}
+
+# 获取和更新余额函数
+def get_balance(user_id):
+    return user_balance.get(user_id, 0)
+
+def update_balance(user_id, amount):
+    user_balance[user_id] = get_balance(user_id) + amount
+
+# 特码玩法下注处理
+def bet_special_code(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    message = update.message.text
+
+    try:
+        # 解析下注内容
+        bet_type, numbers, amount = message.split('押')
+        amount = int(amount)
+        numbers = [int(num) for num in numbers.split()]
+        
+        # 检查余额
+        if get_balance(user_id) < amount:
+            update.message.reply_text("余额不足，无法下注！")
+            return
+        
+        update_balance(user_id, -amount)
+        user_bets[user_id] = user_bets.get(user_id, []) + [{'玩法': '特码', '号码': numbers, '金额': amount}]
+        update.message.reply_text(f"您已成功下注特码 {numbers}，金额：{amount} 元")
+    
+    except Exception as e:
+        update.message.reply_text(f"下注格式错误: {str(e)}")
+
+# 特肖玩法下注处理
+def bet_zodiac(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    message = update.message.text
+
+    try:
+        bet_type, zodiac, amount = message.split('押')
+        amount = int(amount)
+
+        # 验证生肖
+        if zodiac not in ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"]:
+            raise ValueError("无效的生肖类型")
+
+        if get_balance(user_id) < amount:
+            update.message.reply_text("余额不足，无法下注！")
+            return
+
+        update_balance(user_id, -amount)
+        user_bets[user_id] = user_bets.get(user_id, []) + [{'玩法': '特肖', '生肖': zodiac, '金额': amount}]
+        update.message.reply_text(f"您已成功下注特肖 {zodiac}，金额：{amount} 元")
+
+    except Exception as e:
+        update.message.reply_text(f"下注格式错误: {str(e)}")
+
+# 波色玩法下注处理
+def bet_wave(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    message = update.message.text
+
+    try:
+        if message.startswith("红波"):
+            wave = '红波'
+        elif message.startswith("蓝波"):
+            wave = '蓝波'
+        elif message.startswith("绿波"):
+            wave = '绿波'
+        else:
+            raise ValueError("未知的波色类型")
+
+        amount = int(message.split("押")[1])
+
+    except (IndexError, ValueError):
+        update.message.reply_text("格式错误！请使用 '红波押10' 或 '蓝波押10'")
+        return
+
+    if get_balance(user_id) < amount:
+        update.message.reply_text("余额不足，无法下注！")
+        return
+
+    update_balance(user_id, -amount)
+    user_bets[user_id] = user_bets.get(user_id, []) + [{'玩法': '波色', '波色': wave, '金额': amount}]
+    update.message.reply_text(f"您已成功下注{wave}，金额：{amount} 元")
+
+# 中奖判断函数（示例）
+def check_wave_winning(draw_result, user_id):
+    winnings = 0
+    for bet in user_bets.get(user_id, []):
+        if bet['玩法'] == '波色':
+            wave = bet['波色']
+            wave_numbers = wave_colors[wave]
+            draw_numbers = set(draw_result)
+            
+            if draw_numbers & wave_numbers:
+                winnings += bet['金额'] * odds['波色'][wave]
+
+    return winnings
+
+# 开奖并结算函数
+def settle_bets(update: Update, context: CallbackContext):
+    draw_result = [1, 2, 3, 4, 5, 6, 7]  # 示例开奖
+    update.message.reply_text(f"开奖结果：{draw_result}")
+
+    for user_id in user_bets:
+        winnings = 0
+        winnings += check_wave_winning(draw_result, user_id)
+
+        if winnings > 0:
+            update_balance(user_id, winnings)
+            context.bot.send_message(user_id, f"恭喜中奖！您的奖金为：{winnings} 元")
+        else:
+            context.bot.send_message(user_id, "很遗憾，本次未中奖。")
+
+    user_bets.clear()
+
+# 用户余额查询命令
+def balance(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    balance = get_balance(user_id)
+    update.message.reply_text(f"您的余额为：{balance} 元")
+
+# 初始化Telegram bot命令和处理器
+def main():
+    updater = Updater("YOUR_BOT_TOKEN", use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("balance", balance))
+    dp.add_handler(CommandHandler("draw", settle_bets))
+    dp.add_handler(MessageHandler(Filters.regex(r'^特码\d+.*押\d+$'), bet_special_code))
+    dp.add_handler(MessageHandler(Filters.regex(r'^特肖[\u4e00-\u9fa5]+押\d+$'), bet_zodiac))
+    dp.add_handler(MessageHandler(Filters.regex(r'^(红波|蓝波|绿波)押\d+$'), bet_wave))
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
