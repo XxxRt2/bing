@@ -1,155 +1,148 @@
-import random
+import requests
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from config import ADMIN_USER_ID, odds, zodiac_map
+from random import randint
+import logging
+from config import API_KEY, ADMINS, LOTTERY_API_URL
 
-# 初始化用户余额和下注记录
-user_balances = {}
-user_bets = {}
+# 设置日志记录
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# 更新用户余额
-def update_balance(user_id, amount):
-    if user_id not in user_balances:
-        user_balances[user_id] = 0
-    user_balances[user_id] += amount
+# 用户管理类
+class User:
+    def __init__(self, user_id, balance=1000):
+        """ 初始化用户，默认余额为1000 """
+        self.user_id = user_id
+        self.balance = balance
 
-# 获取用户余额
-def get_balance(user_id):
-    return user_balances.get(user_id, 0)
+    def bet(self, amount):
+        """ 用户投注，减少余额 """
+        if amount <= self.balance:
+            self.balance -= amount
+            return True  # 下注成功
+        else:
+            return False  # 余额不足，下注失败
 
-# 下注处理函数
-def bet(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    message = update.message.text
+    def add_balance(self, amount):
+        """ 用户充值，增加余额 """
+        self.balance += amount
 
-    # 检查下注格式
-    parts = message.split()
-    if len(parts) < 2:
-        update.message.reply_text("请输入有效的下注格式！例如：'特码01押100'")
-        return
+    def get_balance(self):
+        """ 获取当前余额 """
+        return self.balance
 
-    bet_type = parts[0]
-    amount = int(parts[1])
 
-    # 下注处理
-    if bet_type.startswith("特码"):
-        numbers = list(map(int, parts[0][2:].split()))  # 解析特码下注号码
-        add_bet(user_id, '特码', numbers, amount)
-        update.message.reply_text(f"下注成功！下注类型：特码，号码：{numbers}，金额：{amount}")
-    elif bet_type.startswith("特肖"):
-        zodiac = parts[0][2:]
-        add_bet(user_id, '特肖', zodiac, amount)
-        update.message.reply_text(f"下注成功！下注类型：特肖，生肖：{zodiac}，金额：{amount}")
-    elif bet_type.startswith("波色"):
-        wave_color = parts[0]
-        add_bet(user_id, '波色', wave_color, amount)
-        update.message.reply_text(f"下注成功！下注类型：波色，颜色：{wave_color}，金额：{amount}")
-    else:
-        update.message.reply_text("未识别的下注类型！")
+# 彩票机器人类
+class LotteryBot:
+    def __init__(self, updater):
+        self.updater = updater
+        self.dispatcher = updater.dispatcher
+        self.users = {}  # 存储所有用户
+        self.add_handlers()
 
-# 添加下注记录
-def add_bet(user_id, bet_type, selection, amount):
-    if user_id not in user_bets:
-        user_bets[user_id] = []
-    user_bets[user_id].append({'玩法': bet_type, '号码': selection, '金额': amount})
+    def add_user(self, user_id, balance=1000):
+        """ 添加新用户 """
+        if user_id not in self.users:
+            self.users[user_id] = User(user_id, balance)
 
-# 结算函数
-def settle_bets(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    draw_result = random.sample(range(1, 50), 7)  # 模拟开奖结果
-    winning_amount = 0
+    def check_balance(self, user_id):
+        """ 查询用户余额 """
+        if user_id not in self.users:
+            self.add_user(user_id)
+        return self.users[user_id].get_balance()
 
-    # 检查用户下注并计算获奖金额
-    winnings_special_code = check_special_code_winning(draw_result, user_id)
-    winnings_zodiac = check_zodiac_winning(draw_result, user_id)
-    winnings_wave = check_wave_winning(draw_result, user_id)
+    def bet_特码(self, user_id, amount):
+        """ 处理特码下注 """
+        if user_id in self.users and self.users[user_id].bet(amount):
+            return amount * 47  # 假设 47 是特码的赔率
+        return 0
 
-    winning_amount += winnings_special_code + winnings_zodiac + winnings_wave
+    def admin_modify_balance(self, admin_id, user_id, amount):
+        """ 管理员修改用户余额 """
+        if admin_id in ADMINS:
+            if user_id in self.users:
+                self.users[user_id].add_balance(amount)
+                return f"管理员 {admin_id} 修改了用户 {user_id} 的余额，增加了 {amount}，新余额为 {self.users[user_id].get_balance()}"
+            else:
+                return f"用户 {user_id} 不存在。"
+        else:
+            return f"管理员权限不足，{admin_id} 不是管理员。"
 
-    # 更新余额
-    update_balance(user_id, winning_amount)
+    def add_handlers(self):
+        """ 添加所有处理器 """
+        self.dispatcher.add_handler(CommandHandler("start", self.start))
+        self.dispatcher.add_handler(CommandHandler("balance", self.check_balance_command))
+        self.dispatcher.add_handler(CommandHandler("bet", self.handle_bet))
+        self.dispatcher.add_handler(CommandHandler("admin", self.admin_commands))
+        self.dispatcher.add_handler(CommandHandler("draw", self.draw))
+        self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self.message_handler))
 
-    # 返回结算信息
-    update.message.reply_text(f"开奖结果：{draw_result}\n您总共赢得：{winning_amount} 元！")
-    user_bets[user_id] = []  # 清空下注记录
+    def start(self, update: Update, context: CallbackContext):
+        """ 发送欢迎信息 """
+        update.message.reply_text("欢迎使用六和彩机器人！输入 /bet 开始投注，输入 /balance 查看余额。")
 
-# 检查特码中奖
-def check_special_code_winning(draw_result, user_id):
-    winnings = 0
-    for bet in user_bets.get(user_id, []):
-        if bet['玩法'] == '特码':
-            if any(num in draw_result for num in bet['号码']):
-                winnings += bet['金额'] * odds['特码']
-    return winnings
+    def check_balance_command(self, update: Update, context: CallbackContext):
+        """ 查看余额 """
+        user_id = update.message.from_user.id
+        balance = self.check_balance(user_id)
+        update.message.reply_text(f"你的余额是: {balance} 元")
 
-# 检查特肖中奖
-def check_zodiac_winning(draw_result, user_id):
-    winnings = 0
-    for bet in user_bets.get(user_id, []):
-        if bet['玩法'] == '特肖':
-            if bet['生肖'] in draw_result:
-                winnings += bet['金额'] * odds['特肖不带龙']
-    return winnings
+    def handle_bet(self, update: Update, context: CallbackContext):
+        """ 处理下注 """
+        user_id = update.message.from_user.id
+        bet_info = update.message.text.split(" ", 2)
+        if len(bet_info) < 3:
+            update.message.reply_text("格式错误！请按如下格式下注：/bet 特码 50")
+            return
+        bet_type, amount = bet_info[1], int(bet_info[2])
 
-# 检查波色中奖
-def check_wave_winning(draw_result, user_id):
-    winnings = 0
-    for bet in user_bets.get(user_id, []):
-        if bet['玩法'] == '波色':
-            wave = bet['号码']
-            if wave in draw_result:
-                winnings += bet['金额'] * odds['波色'][wave]
-    return winnings
+        if bet_type == "特码":
+            result = self.bet_特码(user_id, amount)
+            if result > 0:
+                update.message.reply_text(f"你下注成功，可能获得: {result} 元")
+            else:
+                update.message.reply_text("下注失败，余额不足。")
 
-# 查看余额
-def balance(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    update.message.reply_text(f"您的当前余额为：{get_balance(user_id)} 元")
+    def admin_commands(self, update: Update, context: CallbackContext):
+        """ 管理员命令处理 """
+        admin_id = update.message.from_user.id
+        if admin_id not in ADMINS:
+            update.message.reply_text("你没有管理员权限！")
+            return
 
-# 设置用户余额（管理员命令）
-def set_balance(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_USER_ID:
-        update.message.reply_text("您没有权限执行此操作！")
-        return
+        args = update.message.text.split(" ")
+        if len(args) < 3:
+            update.message.reply_text("格式错误！请按如下格式使用管理员命令：/admin 修改余额 <用户ID> <金额>")
+            return
 
-    if len(context.args) != 2:
-        update.message.reply_text("命令格式错误！正确格式：/set_balance <user_id> <amount>")
-        return
+        action, user_id, amount = args[1], args[2], int(args[3])
+        if action == "修改余额":
+            response = self.admin_modify_balance(admin_id, user_id, amount)
+            update.message.reply_text(response)
 
-    target_user_id = int(context.args[0])
-    amount = int(context.args[1])
+    def message_handler(self, update: Update, context: CallbackContext):
+        """ 捕获未识别的消息 """
+        update.message.reply_text("不支持的命令，请使用 /start 获取帮助。")
 
-    update_balance(target_user_id, amount)
-    update.message.reply_text(f"管理员已成功调整用户 {target_user_id} 的余额：{amount}")
-    context.bot.send_message(target_user_id, f"您的余额已被管理员修改，当前余额为：{get_balance(target_user_id)} 元。")
+    def draw(self, update: Update, context: CallbackContext):
+        """ 获取并发送最新的开奖信息 """
+        try:
+            response = requests.get(LOTTERY_API_URL)
+            data = response.json()
+            draw_result = data.get("result", "无法获取开奖数据")
+            update.message.reply_text(f"最新开奖信息：{draw_result}")
+        except requests.exceptions.RequestException as e:
+            update.message.reply_text(f"获取开奖信息失败: {str(e)}")
 
-# 启动命令
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("欢迎来到六合彩！使用以下命令进行下注和结算:\n"
-                              "/settle - 结算开奖并结算下注\n"
-                              "/balance - 查看余额\n"
-                              "/set_balance <user_id> <amount> - 管理员修改用户余额")
 
-# 主函数
 def main():
-    # 用自己的 API Token 替换 'YOUR_TOKEN'
-    updater = Updater("YOUR_TOKEN", use_context=True)
-    dispatcher = updater.dispatcher
-
-    # 添加命令处理程序
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("settle", settle_bets))
-    dispatcher.add_handler(CommandHandler("balance", balance))
-    dispatcher.add_handler(CommandHandler("set_balance", set_balance, pass_args=True))
-
-    # 添加消息处理程序
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, bet))
-
-    # 启动 Bot
+    """ 机器人入口函数 """
+    updater = Updater(API_KEY, use_context=True)
+    bot = LotteryBot(updater)
     updater.start_polling()
     updater.idle()
 
 if __name__ == '__main__':
     main()
-
